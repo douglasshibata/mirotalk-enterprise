@@ -1,0 +1,91 @@
+version: "3.8"
+
+services:
+  # --- Reverse Proxy & SSL Termination ---
+  nginx:
+    image: nginx:1.25-alpine
+    container_name: rtc-nginx
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/certs:/etc/nginx/certs:ro
+    depends_on:
+      - mirotalk-sfu
+      - auth-gateway
+    networks:
+      - rtc-network
+
+  # --- MiroTalk SFU WebRTC Engine ---
+  mirotalk-sfu:
+    image: mirotalk/sfu:latest
+    container_name: rtc-mirotalk-sfu
+    restart: always
+    # Note: For production performance with Mediasoup SFU, running on "network_mode: host"
+    # is strongly recommended to avoid Docker's userland proxy overhead on the high UDP port range.
+    # If using host network, comment out 'ports' and 'networks' below, and uncomment 'network_mode: host'.
+    # network_mode: host
+    ports:
+      - "3010:3010"                       # Signaling API port
+      - "40000-40100:40000-40100/udp"     # Mediasoup RTC UDP Media Range
+      - "40000-40100:40000-40100/tcp"     # Mediasoup RTC TCP Media Range (fallback)
+    environment:
+      - ENVIRONMENT=production
+      - SERVER_HOST=0.0.0.0
+      - PORT=3010
+      - SFU_ANNOUNCED_IP=${PUBLIC_IP}
+      - SFU_MIN_PORT=40000
+      - SFU_MAX_PORT=40100
+      - API_KEY_SECRET=${API_KEY_SECRET}
+      - HOST_PROTECTED=true
+      - HOST_USER_AUTH=true
+      - JWT_SECRET=${JWT_SECRET}
+      - JWT_EXPIRATION=${JWT_EXPIRATION}
+    networks:
+      - rtc-network
+
+  # --- Coturn STUN / TURN Server ---
+  coturn:
+    image: coturn/coturn:latest
+    container_name: rtc-coturn
+    restart: always
+    # Note: Just like the SFU, Coturn performs best under "network_mode: host" in production
+    # to avoid bottlenecks routing WebRTC relay packets.
+    # network_mode: host
+    ports:
+      - "3478:3478"                       # STUN/TURN listening port (UDP & TCP)
+      - "3478:3478/udp"
+      - "5349:5349"                       # STUN/TURN over TLS (TCP & UDP)
+      - "5349:5349/udp"
+      - "49152-49200:49152-49200/udp"     # Relay ports range (narrowed down for Docker mapping demo)
+    volumes:
+      - ./coturn/turnserver.conf:/etc/coturn/turnserver.conf:ro
+    networks:
+      - rtc-network
+
+  # --- Authentication & Room Gateway API ---
+  auth-gateway:
+    build:
+      context: ./gateway
+      dockerfile: Dockerfile
+    container_name: rtc-auth-gateway
+    restart: always
+    ports:
+      - "4000:4000"
+    environment:
+      - PORT=4000
+      - JWT_SECRET=${JWT_SECRET}
+      - API_KEY_SECRET=${API_KEY_SECRET}
+      - MIROTALK_URL=https://${DOMAIN_NAME}
+      - MIROTALK_API_URL=http://mirotalk-sfu:3010
+    depends_on:
+      - mirotalk-sfu
+    networks:
+      - rtc-network
+
+networks:
+  rtc-network:
+    name: rtc-network
+    driver: bridge
